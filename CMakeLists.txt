@@ -14,4 +14,5 @@ add_executable(main
     src/echo_server.cpp
     src/debug.cpp
     src/client_manager.cpp
+    src/epoll_helper.cpp
 )

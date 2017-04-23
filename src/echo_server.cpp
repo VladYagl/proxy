@@ -1,18 +1,17 @@
 #include "echo_server.h"
-#include "debug.h"
-#include "utils.h"
-#include "exceptions.h"
 #include "client_manager.h"
+#include "debug.h"
+#include "epoll_helper.h"
+#include "exceptions.h"
+#include "utils.h"
 
-#include <sys/socket.h>
-#include <unistd.h>
 #include <arpa/inet.h>
+#include <unistd.h>
+#include <cstdio>
+#include <cstdlib>
 
 void echo_server::init_socket() {
-    // int socket(int domain, int type, int protocol);
-    // AF_INET         IPv4 Internet protocols
-    // SOCK_STREAM     Provides sequenced, reliable, two-way, connection-based byte  streams.   An  out-of-band  data transmission mechanism may be supported.
-    socket_fd = safe_call(::socket(AF_INET, SOCK_STREAM, 0));
+    socket_fd = safe_call(::socket(SOCKET_DOMAIN, SOCKET_TYPE, 0));
 }
 
 void echo_server::bind_socket(sockaddr_in addr) {
@@ -21,7 +20,7 @@ void echo_server::bind_socket(sockaddr_in addr) {
 
 sockaddr_in echo_server::make_socketaddr(uint16_t port) {
     sockaddr_in addr;
-    addr.sin_family = AF_INET;
+    addr.sin_family = SOCKET_DOMAIN;
     addr.sin_port = htons(port);               // function converts the unsigned short integer hostshort from host byte order to network byte order.
     addr.sin_addr.s_addr = htonl(INADDR_ANY);  // htonl - same but long,
     return addr;
@@ -31,23 +30,11 @@ void echo_server::listen_socket() {
     safe_call(::listen(socket_fd, SOMAXCONN));
 }
 
-int echo_server::accept_socket() {
-    // TODO: I'm not sure about that flags
-    sockaddr_in client_addr = make_socketaddr(DEFAULT_PORT);
-    socklen_t client_len = sizeof(client_addr);
-    int result = safe_call(::accept4(socket_fd, (sockaddr*)&client_addr, &client_len, ::SOCK_CLOEXEC));
-    debug::log(std::string("Accepted: ") + ::inet_ntoa(client_addr.sin_addr));
-    return result;
-}
-
 void echo_server::close() {
+    // TODO: close all clients
     log_name();
-    if (!closed) {
-        closed = true;
-        while (!ended) {
-        }
-        safe_call(::close(socket_fd));
-    }
+    safe_call(::close(socket_fd));
+    debug::log("R.I.P.");
 }
 
 echo_server::echo_server() : echo_server(DEFAULT_PORT) {
@@ -68,17 +55,44 @@ void echo_server::start() {
     debug::log();
     log_name();
 
-    ended = false;
-    closed = false;
-
     listen_socket();
-    client_manager client;
-    while (!closed) {
-        client.accept(socket_fd);
-        while (size_t readed = client.read(buffer, BUFFER_SIZE)) {
-            client.write(buffer, readed);
+
+    epoll_helper epoll(socket_fd);
+
+    while (true) {
+        epoll.sleep(2);
+        while (!epoll.empty()) {
+            epoll_event event = epoll.next_event();
+
+            if (event.data.fd == socket_fd) {
+                debug::log("New client");
+                // FIXME: stop making tons of copies of client_manager pls
+                client_manager client;
+                client.accept(socket_fd);
+                int client_fd = client.get_fd();
+                epoll.add_client(client_fd);
+                clients.emplace(client_fd, client);
+            } else if (event.data.fd == epoll.signal_fd) {
+                // FIXME use another exception here
+                throw new server_exception("signal caught");
+            } else {
+                if ((event.events & ::EPOLLIN) != 0) {
+                    clients[event.data.fd].read_in_buffer();
+                    clients[event.data.fd].write_from_buffer();
+                }
+                /* if ((event.events & ::EPOLLOUT) != 0) { */
+                /* debug::log("Write to client"); */
+                /* clients[event.data.fd].write_from_buffer(); */
+                /* } */
+            }
         }
     }
-    ended = true;
-    close();
+
+    /* client_manager client; */
+    /* while (!closed) { */
+    /*     client.accept(socket_fd); */
+    /*     while (size_t readed = client.read(buffer, BUFFER_SIZE)) { */
+    /*         client.write(buffer, readed); */
+    /*     } */
+    /* } */
 }
